@@ -1,57 +1,80 @@
-import csv
-import requests
 from flask import Flask, Response
+import requests, csv, io
+import html
+from datetime import datetime
 
 app = Flask(__name__)
 
 CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vR4ZELBB4oxdsdnCcZz-Svv4Jx2fuWxdLepdn1KuwtDUkNWkCf4FixqnREchgjgESOgGnAUReiL-KSF/pub?output=csv"
+MERCHANT_ID = "30345911"
 
-@app.route("/price.xml")
+@app.route('/price.xml')
 def price_xml():
-    response = requests.get(CSV_URL)
-    response.encoding = "utf-8"
-    data = response.text.splitlines()
+    resp = requests.get(CSV_URL)
+    resp.encoding = 'utf-8'
+    csv_text = resp.text
 
-    reader = csv.DictReader(data)
+    # Лог для проверки: первые 500 символов CSV
+    print("=== CSV начало ===")
+    print(csv_text[:500])
+    print("=== Конец начала CSV ===")
 
-    # Заголовок XML
-    xml = '<?xml version="1.0" encoding="utf-8"?>\n'
-    xml += '<kaspi_catalog date="2025-09-14" xmlns="kaspiShopping" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
-    xml += f'  <company>30345911</company>\n'
-    xml += f'  <merchantid>30345911</merchantid>\n'
+    reader = csv.DictReader(io.StringIO(csv_text))
+
+    # Формируем XML
+    date_now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    xml = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    xml += f'<kaspi_catalog xmlns="kaspiShopping" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://kaspi.kz/kaspishopping.xsd" date="{date_now}">\n'
+    xml += f'  <company>{MERCHANT_ID}</company>\n'
+    xml += f'  <merchantid>{MERCHANT_ID}</merchantid>\n'
     xml += '  <offers>\n'
 
+    rows_count = 0
+    offers_count = 0
+
     for row in reader:
-        try:
-            product_id = row.get("ID", "").strip()
-            sku = row.get("SKU", "").strip()
-            name = row.get("Наименование", "").strip()
-            brand = row.get("Бренд", "").strip()
-            price = row.get("Цена", "").strip()
-            quantity = row.get("Количество", "").strip()
-            city_availability = row.get("Доступность", "Уральск").strip()  # по умолчанию Уральск
+        rows_count += 1
 
-            if not product_id or not price:
-                continue  # пропускаем пустые строки
+        sku = html.escape(row.get("SKU", "").strip())
+        model = html.escape(row.get("model", "").strip())
+        brand = html.escape(row.get("brand", "").strip())
+        price = row.get("price", "").strip() or "0"
+        preorder = row.get("preorder", "").strip() or "0"
 
+        # лог: какой sku и модель
+        print(f"Row {rows_count}: SKU='{sku}' model='{model}' price='{price}' preorder='{preorder}'")
+
+        # формируем availabilities
+        availabilities = []
+        for i in range(1, 6):
+            stock_raw = row.get(f"PP{i}", "").strip()
+            stock_count = stock_raw if stock_raw.isdigit() else "0"
+
+            available = "yes" if stock_raw.isdigit() and int(stock_raw) > 0 else "no"
+
+            store_id = f"{MERCHANT_ID}_PP{i}"
+            availabilities.append(
+                f'<availability available="{available}" storeId="{store_id}" preOrder="{preorder}" stockCount="{stock_count}"/>'
+            )
+
+        # проверка, есть ли предложение (хотя бы один available=yes и price > 0)
+        if price != "0":
+            offers_count += 1
             xml += f'    <offer sku="{sku}">\n'
-            xml += f'      <model>{name}</model>\n'
+            xml += f'      <model>{model}</model>\n'
             xml += f'      <brand>{brand}</brand>\n'
+            xml += f'      <availabilities>\n'
+            xml += "      " + "\n      ".join(availabilities) + "\n"
+            xml += f'      </availabilities>\n'
             xml += f'      <price>{price}</price>\n'
-            xml += f'      <quantity>{quantity if quantity else 1}</quantity>\n'
-            xml += f'      <cityavailability>\n'
-            xml += f'        <city id="750000000">Уральск</city>\n'
-            xml += f'      </cityavailability>\n'
             xml += f'    </offer>\n'
-        except Exception as e:
-            print("Ошибка строки:", row, e)
 
-    # Закрывающие теги
-    xml += '  </offers>\n'
-    xml += '</kaspi_catalog>\n'
+    xml += '  </offers>\n</kaspi_catalog>\n'
 
-    return Response(xml, mimetype="application/xml")
+    print(f"Всего строк в CSV: {rows_count}, предложений (offers): {offers_count}")
+
+    return Response(xml, mimetype='application/xml')
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
